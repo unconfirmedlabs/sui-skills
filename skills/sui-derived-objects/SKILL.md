@@ -35,36 +35,27 @@ Keys must have `copy + drop + store`. This is satisfied by tuple structs contain
 
 ## ObjectKey Patterns
 
-The derivation key is a struct you define in your module. It determines how many derived objects a parent can produce and what identifies each one. There are three patterns.
+The derivation key is a struct you define in your module. It determines how many derived objects a parent can produce and what identifies each one.
 
 ### Pattern 1: Unit Struct Key (one-to-one)
 
 Derives exactly **one** object per parent. Used for admin capabilities, metadata singletons, or any 1:1 relationship.
 
 ```move
-/// Key for deriving the admin capability from the composition.
-public struct CompositionAdminCapKey() has copy, drop, store;
+/// Key for deriving an admin cap from the parent object.
+public struct AdminCapKey() has copy, drop, store;
 
-public struct CompositionAdminCap<phantom CompositionShare> has key, store {
+public struct AdminCap has key, store {
     id: UID,
 }
 
 // In the creation function:
-let composition_admin_cap = CompositionAdminCap<CompositionShare> {
-    id: claim(&mut composition.id, CompositionAdminCapKey()),
+let admin_cap = AdminCap {
+    id: claim(&mut parent.id, AdminCapKey()),
 };
 ```
 
 The unit struct has no fields, so BCS encodes as a single `0x00` byte (the compiler injects `dummy_field: bool = false`).
-
-**More examples:**
-
-```move
-public struct RecordingAdminCapKey() has copy, drop, store;
-public struct ReleaseAdminCapKey() has copy, drop, store;
-public struct PressingAdminCapKey() has copy, drop, store;
-public struct VaultAdminCapKey() has copy, drop, store;
-```
 
 ### Pattern 2: Value Key (one-to-many)
 
@@ -73,11 +64,10 @@ Derives **multiple** objects from one parent, each identified by a value. Used f
 **Address key** — one per wallet:
 
 ```move
-public struct PlayerKey(address) has copy, drop, store;
+public struct ProfileKey(address) has copy, drop, store;
 
-// In the creation function:
-let player = Player {
-    id: derived_object::claim(&mut registry.id, PlayerKey(ctx.sender())),
+let profile = Profile {
+    id: derived_object::claim(&mut registry.id, ProfileKey(ctx.sender())),
     // ...
 };
 ```
@@ -85,18 +75,18 @@ let player = Player {
 **Integer key** — sequential editions:
 
 ```move
-public struct PressingKey(u16) has copy, drop, store;
+public struct EditionKey(u16) has copy, drop, store;
 
 // Verify sequential ordering before claiming
 if (edition > 0) {
     assert!(
-        derived_object::exists(release.uid(), PressingKey(edition - 1)),
-        ENotSequentialEditionNumber,
+        derived_object::exists(parent.uid(), EditionKey(edition - 1)),
+        ENotSequentialEdition,
     );
 };
 
-let pressing = Pressing<Currency> {
-    id: derived_object::claim(release.uid_mut(cap), PressingKey(edition)),
+let child = Child {
+    id: derived_object::claim(parent.uid_mut(cap), EditionKey(edition)),
     // ...
 };
 ```
@@ -104,10 +94,10 @@ let pressing = Pressing<Currency> {
 **String key** — named entries:
 
 ```move
-public struct GenreKey(String) has copy, drop, store;
+public struct CategoryKey(String) has copy, drop, store;
 
-let genre = Genre {
-    id: claim(&mut genre_registry.id, GenreKey(name)),
+let category = Category {
+    id: claim(&mut registry.id, CategoryKey(name)),
     name,
 };
 ```
@@ -115,34 +105,30 @@ let genre = Genre {
 **Digest key** — content-addressed:
 
 ```move
-public struct ReleaseKey(vector<u8>) has copy, drop, store;
+public struct ContentKey(vector<u8>) has copy, drop, store;
 
 // Hash the content to produce a deterministic key
-fun calculate_release_digest(
-    recording_ids: vector<ID>,
-    track_split_values: vector<u64>,
-    nonce: u256,
-): vector<u8> {
+fun calculate_digest(ids: vector<ID>, values: vector<u64>, nonce: u256): vector<u8> {
     let mut hash_input = vector<u8>[];
-    hash_input.append(to_bytes(&recording_ids));
-    hash_input.append(to_bytes(&track_split_values));
+    hash_input.append(to_bytes(&ids));
+    hash_input.append(to_bytes(&values));
     hash_input.append(to_bytes(&nonce));
     blake2b256(&hash_input)
 }
 
-let release_uid = claim(&mut registry.id, ReleaseKey(release_digest));
+let child = Child {
+    id: claim(&mut registry.id, ContentKey(digest)),
+    // ...
+};
 ```
 
 **TypeName key** — one per type:
 
 ```move
-public struct RecordingKey(TypeName) has copy, drop, store;
+public struct ChildKey(TypeName) has copy, drop, store;
 
-let recording = Recording<RecordingShare> {
-    id: claim(
-        composition.uid_mut_internal(),
-        RecordingKey(*master.ingester_type()),
-    ),
+let child = Child {
+    id: claim(parent.uid_mut(), ChildKey(type_name::get<T>())),
     // ...
 };
 ```
@@ -152,40 +138,39 @@ let recording = Recording<RecordingShare> {
 Uses a phantom type parameter on the key struct to namespace derivations by type. Useful when the same parent needs derived objects for different currency types or token types.
 
 ```move
-public struct SiloKey<phantom Currency>(u64) has copy, drop, store;
+public struct VaultKey<phantom Currency>(u64) has copy, drop, store;
 
-public fun new<Currency>(parent: &mut UID, idx: u64): Silo<Currency> {
-    Silo {
-        id: claim(parent, SiloKey<Currency>(idx)),
+public fun new<Currency>(parent: &mut UID, idx: u64): Vault<Currency> {
+    Vault {
+        id: claim(parent, VaultKey<Currency>(idx)),
         balance: balance::zero(),
     }
 }
 ```
 
-The phantom type is included in the type hash, so `SiloKey<SUI>(0)` and `SiloKey<USDC>(0)` produce different addresses from the same parent.
+The phantom type is included in the type hash, so `VaultKey<SUI>(0)` and `VaultKey<USDC>(0)` produce different addresses from the same parent.
 
 ### Pattern 4: Complex Key (runtime-flexible)
 
 Uses `TypeName` values instead of phantom types for runtime flexibility. Essential when you need to iterate over heterogeneous pools or derive addresses from stored type information.
 
 ```move
-public struct RewardPoolKey(TypeName, TypeName, Option<TypeName>) has copy, drop, store;
+public struct PoolKey(TypeName, TypeName, Option<TypeName>) has copy, drop, store;
 
 public fun new<Share, Currency>(
     parent: &mut UID,
-    kind: RewardPoolKind,
-): RewardPool<Share, Currency> {
-    let key = RewardPoolKey(
+    kind: PoolKind,
+): Pool<Share, Currency> {
+    let key = PoolKey(
         with_defining_ids<Share>(),
         with_defining_ids<Currency>(),
         kind.authority_type(),
     );
 
-    let reward_pool = RewardPool<Share, Currency> {
+    Pool {
         id: claim(parent, key),
         // ...
-    };
-    reward_pool
+    }
 }
 ```
 
@@ -199,32 +184,33 @@ Derived objects can themselves be parents. This creates deterministic object hie
 
 ```
 Registry
-  └─ Release (derived via ReleaseKey(digest))
-       ├─ ReleaseAdminCap (derived via ReleaseAdminCapKey())
-       └─ Pressing (derived via PressingKey(edition))
-            └─ PressingAdminCap (derived via PressingAdminCapKey())
+  └─ Parent (derived via ContentKey(digest))
+       ├─ ParentAdminCap (derived via AdminCapKey())
+       └─ Child (derived via EditionKey(edition))
+            └─ ChildAdminCap (derived via AdminCapKey())
 ```
 
 ```move
-// 1. Release derived from Registry
-let release_uid = claim(&mut registry.id, ReleaseKey(release_digest));
-
-// 2. ReleaseAdminCap derived from Release
-let release_admin_cap = ReleaseAdminCap {
-    id: claim(&mut release.id, ReleaseAdminCapKey()),
-    release_id: release.id(),
-};
-
-// 3. Pressing derived from Release
-let pressing = Pressing<Currency> {
-    id: derived_object::claim(release.uid_mut(cap), PressingKey(edition)),
+// 1. Parent derived from Registry
+let parent = Parent {
+    id: claim(&mut registry.id, ContentKey(digest)),
     // ...
 };
 
-// 4. PressingAdminCap derived from Pressing
-let pressing_admin_cap = PressingAdminCap {
-    id: derived_object::claim(&mut pressing.id, PressingAdminCapKey()),
-    pressing_id: pressing.id(),
+// 2. AdminCap derived from Parent
+let parent_admin_cap = ParentAdminCap {
+    id: claim(&mut parent.id, AdminCapKey()),
+};
+
+// 3. Child derived from Parent
+let child = Child {
+    id: claim(&mut parent.id, EditionKey(edition)),
+    // ...
+};
+
+// 4. AdminCap derived from Child
+let child_admin_cap = ChildAdminCap {
+    id: claim(&mut child.id, AdminCapKey()),
 };
 ```
 
@@ -236,12 +222,13 @@ Use `derive_address` to verify a derived object belongs to its parent without st
 
 ```move
 public fun withdraw<Currency>(
-    self: &mut Silo<Currency>,
+    self: &mut Vault<Currency>,
     parent: &mut UID,
+    idx: u64,
     value: Option<u64>,
 ): Balance<Currency> {
     assert!(
-        self.id.to_address() == derive_address(parent.to_inner(), SiloKey<Currency>(idx)),
+        self.id.to_address() == derive_address(parent.to_inner(), VaultKey<Currency>(idx)),
         EUnauthorized,
     );
     self.balance.split(value.destroy_or!(self.balance.value()))
@@ -256,8 +243,8 @@ Use `exists` to enforce ordering or prevent duplicates:
 // Enforce sequential edition numbers
 if (edition > 0) {
     assert!(
-        derived_object::exists(release.uid(), PressingKey(edition - 1)),
-        ENotSequentialEditionNumber,
+        derived_object::exists(parent.uid(), EditionKey(edition - 1)),
+        ENotSequentialEdition,
     );
 };
 ```
@@ -290,13 +277,10 @@ Unit structs have a compiler-injected `dummy_field: bool = false`. BCS = `0x00`.
 ```typescript
 const UNIT_STRUCT_KEY_BYTES = new Uint8Array([0x00]);
 
-// Derive CompositionAdminCap from Composition
-function deriveCompositionAdminCapId(
-  compositionId: string,
-  musicOsPackageId: string
-): string {
-  const keyType = `${musicOsPackageId}::composition::CompositionAdminCapKey`;
-  return deriveObjectID(compositionId, keyType, UNIT_STRUCT_KEY_BYTES);
+// AdminCapKey() — derive AdminCap from parent
+function deriveAdminCapId(parentId: string, packageId: string): string {
+  const keyType = `${packageId}::my_module::AdminCapKey`;
+  return deriveObjectID(parentId, keyType, UNIT_STRUCT_KEY_BYTES);
 }
 ```
 
@@ -305,30 +289,41 @@ function deriveCompositionAdminCapId(
 BCS-serialize the inner value.
 
 ```typescript
-// PlayerKey(address) — derive Player from PlayerRegistry
-function derivePlayerId(
-  playerRegistryId: string,
+// ProfileKey(address) — derive Profile from Registry
+function deriveProfileId(
+  registryId: string,
   walletAddress: string,
-  sonaPlayerPackageId: string
+  packageId: string,
 ): string {
-  const keyType = `${sonaPlayerPackageId}::player::PlayerKey`;
+  const keyType = `${packageId}::my_module::ProfileKey`;
   const keyBytes = bcs.Address.serialize(walletAddress).toBytes();
-  return deriveObjectID(playerRegistryId, keyType, keyBytes);
+  return deriveObjectID(registryId, keyType, keyBytes);
+}
+
+// EditionKey(u16)
+function deriveEditionId(
+  parentId: string,
+  edition: number,
+  packageId: string,
+): string {
+  const keyType = `${packageId}::my_module::EditionKey`;
+  const keyBytes = bcs.u16().serialize(edition).toBytes();
+  return deriveObjectID(parentId, keyType, keyBytes);
 }
 ```
 
 ### Vector Keys
 
 ```typescript
-// ReleaseKey(vector<u8>) — derive Release from ReleaseRegistry
-function deriveReleaseId(
-  releaseRegistryId: string,
-  releaseDigest: Uint8Array,
-  musicOsPackageId: string
+// ContentKey(vector<u8>) — derive from digest bytes
+function deriveContentId(
+  registryId: string,
+  digest: Uint8Array,
+  packageId: string,
 ): string {
-  const keyType = `${musicOsPackageId}::release::ReleaseKey`;
-  const keyBytes = bcs.vector(bcs.u8()).serialize(releaseDigest).toBytes();
-  return deriveObjectID(releaseRegistryId, keyType, keyBytes);
+  const keyType = `${packageId}::my_module::ContentKey`;
+  const keyBytes = bcs.vector(bcs.u8()).serialize(digest).toBytes();
+  return deriveObjectID(registryId, keyType, keyBytes);
 }
 ```
 
@@ -337,27 +332,28 @@ function deriveReleaseId(
 Define a BCS layout matching the Move struct and serialize.
 
 ```typescript
+// PoolKey(TypeName, TypeName, Option<TypeName>)
 const TypeNameBcs = bcs.struct("TypeName", { name: bcs.string() });
 
-const RewardPoolKeyBcs = bcs.struct("RewardPoolKey", {
+const PoolKeyBcs = bcs.struct("PoolKey", {
   share_type: TypeNameBcs,
   currency_type: TypeNameBcs,
   authority_type: bcs.option(TypeNameBcs),
 });
 
-function deriveRewardPoolId(
-  recordingId: string,
+function derivePoolId(
+  parentId: string,
   shareType: string,
   currencyType: string,
-  umiPackageId: string,
+  packageId: string,
 ): string {
-  const keyType = `${umiPackageId}::reward_pool::RewardPoolKey`;
-  const keyBytes = RewardPoolKeyBcs.serialize({
+  const keyType = `${packageId}::pool::PoolKey`;
+  const keyBytes = PoolKeyBcs.serialize({
     share_type: { name: toMoveTypeName(shareType) },
     currency_type: { name: toMoveTypeName(currencyType) },
     authority_type: null,
   }).toBytes();
-  return deriveObjectID(recordingId, keyType, keyBytes);
+  return deriveObjectID(parentId, keyType, keyBytes);
 }
 ```
 
@@ -375,17 +371,17 @@ function toMoveTypeName(typeStr: string): string {
 
 ### Phantom-Typed Keys
 
-For keys with phantom type parameters like `SiloKey<phantom Currency>(u64)`, include the full generic type in the `keyType` string. Only BCS-serialize the non-phantom fields.
+For keys with phantom type parameters like `VaultKey<phantom Currency>(u64)`, include the full generic type in the `keyType` string. Only BCS-serialize the non-phantom fields.
 
 ```typescript
-// SiloKey<phantom Currency>(u64) — only the u64 is BCS-encoded
-function deriveSiloId(
+// VaultKey<phantom Currency>(u64) — only the u64 is BCS-encoded
+function deriveVaultId(
   parentId: string,
   idx: number,
   currencyType: string,
-  aidaPackageId: string,
+  packageId: string,
 ): string {
-  const keyType = `${aidaPackageId}::silo::SiloKey<${currencyType}>`;
+  const keyType = `${packageId}::vault::VaultKey<${currencyType}>`;
   const keyBytes = bcs.u64().serialize(idx).toBytes();
   return deriveObjectID(parentId, keyType, keyBytes);
 }
@@ -393,7 +389,7 @@ function deriveSiloId(
 
 ### Coin Registry (Sui Framework)
 
-The framework's `CoinRegistry` uses derived objects for `Currency` objects. This is a built-in example of a fieldless generic key:
+The framework's `CoinRegistry` uses derived objects for `Currency` objects. Built-in example of a fieldless generic key:
 
 ```typescript
 // CurrencyKey<phantom T>() — fieldless, just dummy_field: bool = false
@@ -424,14 +420,14 @@ assert(object !== null, 'Derived object ID mismatch');
 
 | Use Case | Pattern | Example |
 |----------|---------|---------|
-| Admin capability per object | Unit struct key | `CompositionAdminCapKey()` |
-| One entry per user | Address key | `PlayerKey(address)` |
-| Sequential children | Integer key | `PressingKey(u16)` |
-| Named entries in registry | String key | `GenreKey(String)` |
-| Content-addressed objects | Digest key | `ReleaseKey(vector<u8>)` |
-| One per type | TypeName key | `RecordingKey(TypeName)` |
-| Multi-currency children | Phantom-typed key | `SiloKey<phantom Currency>(u64)` |
-| Runtime-flexible pools | Complex key with TypeName | `RewardPoolKey(TypeName, TypeName, Option<TypeName>)` |
+| Admin capability per object | Unit struct key | `AdminCapKey()` |
+| One entry per user | Address key | `ProfileKey(address)` |
+| Sequential children | Integer key | `EditionKey(u16)` |
+| Named entries in registry | String key | `CategoryKey(String)` |
+| Content-addressed objects | Digest key | `ContentKey(vector<u8>)` |
+| One per type | TypeName key | `ChildKey(TypeName)` |
+| Multi-currency children | Phantom-typed key | `VaultKey<phantom Currency>(u64)` |
+| Runtime-flexible pools | Complex key with TypeName | `PoolKey(TypeName, TypeName, Option<TypeName>)` |
 
 ## Derived Objects vs Dynamic Fields
 
